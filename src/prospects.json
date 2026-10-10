@@ -1944,5 +1944,33 @@
     "affiliation": "マツゲン簑島硬式野球部",
     "rank": "D",
     "description": "173cm79kg。最速152km/hの横手投げ先発型右腕。今年のクラブ選手権で好投を見せた。昨年の指名漏れの雪辱を果たす。"
+  },
+  {
+    "id": "p147",
+    "name": "杉本 寛斎",
+    "category": "大学",
+    "position": "投手",
+    "throwsHand": "右",
+    "batsHand": "右",
+    "pitcherRole": "万能型",
+    "subPosition": null,
+    "batterType": null,
+    "affiliation": "ブリティッシュコロンビア大",
+    "rank": "A",
+    "description": "187cm108kg。最速158km/h、俊足強打の二刀流。中学卒業後に単身渡米し、投手・打者としての能力を磨いてきた。"
+  },
+  {
+    "id": "p148",
+    "name": "高山 侑大",
+    "category": "大学",
+    "position": "投手",
+    "throwsHand": "右",
+    "batsHand": "左",
+    "pitcherRole": "リリーフ型",
+    "subPosition": null,
+    "batterType": null,
+    "affiliation": "上武大",
+    "rank": "E",
+    "description": "183cm75kg。最速154km/hの速球派右腕。実績は少ないが、三年春の選手権で平均150km/h越えのストレートを披露した。"
   }
 ]
