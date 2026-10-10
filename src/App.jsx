@@ -202,6 +202,7 @@ const isRestrictedForDevelopment = (player) => {
   return false;
 };
 
+// 選手選択AIロジック（育成時完全セーフティ）
 const selectAiProspect = (prospects, confirmedIds, existingPicks = [], teamProfile = null, isRound1 = false, isSubRound = false, isDevMode = false) => {
   let available = prospects.filter((p) => p && !confirmedIds.includes(p.id));
 
@@ -248,22 +249,17 @@ const selectAiProspect = (prospects, confirmedIds, existingPicks = [], teamProfi
     }
   }
 
+  // 育成およびウェーバー
   const topPlayer = available[0];
   const topRankWeight = topPlayer && topPlayer.rank ? (RANK_WEIGHT[topPlayer.rank] ?? 0) : 0;
   
-  const rankMargin = isDevMode ? 3 : 1;
+  const rankMargin = isDevMode ? 4 : 1;
   const candidates = available.filter(
     (p) => (RANK_WEIGHT[p.rank] ?? 0) >= Math.max(0, topRankWeight - rankMargin)
   );
 
-  const posCounts = { 投手: 0, 捕手: 0, 内野手: 0, 外野手: 0 };
-  existingPicks.forEach((pick) => {
-    const pos = pick?.player?.position;
-    if (pos && posCounts[pos] !== undefined) posCounts[pos]++;
-  });
-
   let pool = candidates.length > 0 ? candidates : available;
-  if (teamProfile?.needs?.length > 0 && Math.random() < 0.50) {
+  if (teamProfile?.needs?.length > 0 && Math.random() < 0.40) {
     const primaryNeed = teamProfile.needs[0];
     const needCandidates = pool.filter((p) => {
       if (primaryNeed.pos === "内野手" && primaryNeed.subPos) {
@@ -276,19 +272,8 @@ const selectAiProspect = (prospects, confirmedIds, existingPicks = [], teamProfi
     }
   }
 
-  const balancedPool = pool.filter((p) => {
-    if (isDevMode) return true;
-    if (p.position === "投手" && posCounts["投手"] >= 5) return false;
-    if (p.position !== "投手" && posCounts[p.position] >= 3) return false;
-    return true;
-  });
-
-  if (balancedPool.length > 0) {
-    return balancedPool[Math.floor(Math.random() * balancedPool.length)];
-  }
-
-  if (candidates.length > 0) {
-    return candidates[Math.floor(Math.random() * candidates.length)];
+  if (pool.length > 0) {
+    return pool[Math.floor(Math.random() * pool.length)];
   }
 
   return available[0] || null;
@@ -612,15 +597,18 @@ export default function App() {
     }
   }, [currentRound, baseTeamsList]);
 
+  // 手番がまだ残っている球団リスト
   const activeWaiverOrder = useMemo(() => {
     return waiverOrder.filter((t) => isDevMode ? !teamsState[t.id]?.isDevFinished : !teamsState[t.id]?.isFinished);
   }, [waiverOrder, teamsState, isDevMode]);
 
+  // 現在の手番球団（インデックスが超えても安全に丸める）
   const currentWaiverTeam = useMemo(() => {
     const isWaiverPhase = isDevMode ? true : currentRound >= 2;
     if (!isWaiverPhase || activeWaiverOrder.length === 0) return null;
-    const idx = (roomData.waiverCurrentIndex || 0) % activeWaiverOrder.length;
-    return activeWaiverOrder[idx] || null;
+    const rawIdx = roomData.waiverCurrentIndex || 0;
+    const safeIdx = rawIdx >= activeWaiverOrder.length ? 0 : rawIdx;
+    return activeWaiverOrder[safeIdx] || null;
   }, [currentRound, activeWaiverOrder, roomData.waiverCurrentIndex, isDevMode]);
 
   const allConfirmedPlayerIds = useMemo(() => {
@@ -834,6 +822,7 @@ export default function App() {
     }
   }, [lottery?.player?.id, lottery?.currentPickerIndex, lottery?.isOpened, teamsState, isHost, currentRoomId]);
 
+  // ウェーバー手番の更新ロジック（配列短縮時に安全に先頭または次へ）
   const advanceWaiverTurn = async (updatedTeams, currentIndex, isPicked = true) => {
     if (!currentRoomId) return;
     const currentActive = waiverOrder.filter((t) => isDevMode ? !updatedTeams[t.id]?.isDevFinished : !updatedTeams[t.id]?.isFinished);
@@ -876,7 +865,7 @@ export default function App() {
     }
   };
 
-  // CPUウェーバー自動指名
+  // CPUウェーバー自動指名（完全停止防止ガード付き）
   useEffect(() => {
     const isWaiverPhase = isDevMode ? true : currentRound >= 2;
     if (!isWaiverPhase || !currentWaiverTeam || announcement || !isHost || !roomData.isDraftStarted || !currentRoomId) {
@@ -893,7 +882,7 @@ export default function App() {
       return;
     }
 
-    const stepKey = `${isDevMode ? "dev" : "reg"}_${currentRound}_${currentWaiverTeam.id}_${roomData.waiverCurrentIndex}`;
+    const stepKey = `${isDevMode ? "dev" : "reg"}_${currentRound}_${currentWaiverTeam.id}_${roomData.waiverCurrentIndex || 0}`;
     if (currentWaiverStepRef.current === stepKey) return;
     currentWaiverStepRef.current = stepKey;
 
@@ -965,14 +954,14 @@ export default function App() {
         console.error("CPU Waiver Selection Error:", err);
         advanceWaiverTurn(teamsState, roomData.waiverCurrentIndex || 0, false);
       }
-    }, 850);
+    }, 750);
 
     return () => clearTimeout(timer);
   }, [
     currentRound,
     currentWaiverTeam?.id,
     roomData.waiverCurrentIndex,
-    announcement,
+    announcement?.active,
     isHost,
     teamProfiles,
     isDevMode,
@@ -988,7 +977,7 @@ export default function App() {
       setIsPlayerRevealed(false);
       const timer = setTimeout(() => {
         setIsPlayerRevealed(true);
-      }, 800);
+      }, 700);
       return () => clearTimeout(timer);
     } else {
       setIsPlayerRevealed(false);
@@ -1416,7 +1405,7 @@ export default function App() {
             isOpened: true
           }
         });
-      }, 900);
+      }, 800);
     }
   };
 
@@ -1634,7 +1623,6 @@ export default function App() {
     return (
       <div style={{ backgroundColor: "#0b1329", minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", padding: "20px 12px", color: "#ffffff", fontFamily: '"Hiragino Kaku Gothic ProN", "Meiryo", sans-serif', boxSizing: "border-box" }}>
         
-        {/* ルームID＆リンクバー */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", maxWidth: "1000px", backgroundColor: "#1e293b", padding: "8px 12px", borderRadius: "8px", border: "1px solid #334155", marginBottom: "14px", flexWrap: "wrap", gap: "8px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             <span style={{ fontSize: "12px", color: "#94a3b8", fontWeight: "bold" }}>ルーム:</span>
@@ -1670,7 +1658,6 @@ export default function App() {
           </p>
         </div>
 
-        {/* プレイヤー情報＆参加状況バナー */}
         <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", justifyContent: "center", width: "100%", maxWidth: "1000px", marginBottom: "16px" }}>
           <div style={{ flex: "1 1 200px", display: "flex", alignItems: "center", justifyContent: "space-between", backgroundColor: "#1e293b", padding: "8px 12px", borderRadius: "8px", border: "1px solid #334155" }}>
             <span style={{ fontSize: "12px", color: "#94a3b8", fontWeight: "bold" }}>名前:</span>
@@ -1697,7 +1684,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* ホスト操作領域 */}
         <div style={{ display: "flex", gap: "8px", width: "100%", maxWidth: "1000px", justifyContent: "center", marginBottom: "18px", flexWrap: "wrap" }}>
           {isHost ? (
             <>
@@ -1724,7 +1710,6 @@ export default function App() {
           )}
         </div>
 
-        {/* 12球団選択グリッド（スマホ向けに自動列調整） */}
         {roomData.standings && roomData.teamProfiles && (
           <div style={{ width: "100%", maxWidth: "1000px", marginBottom: "24px" }}>
             <div style={{ backgroundColor: "#1e293b", padding: "10px", borderRadius: "6px", border: "1px solid #475569", marginBottom: "16px", textAlign: "center" }}>
@@ -1800,7 +1785,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* 戦力分析一覧（スマホ時は1列） */}
             <div style={{
               display: "grid",
               gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
@@ -1830,7 +1814,7 @@ export default function App() {
   return (
     <div style={{ backgroundColor: "#ffffff", minHeight: "100vh", padding: "12px 8px", fontFamily: '"Hiragino Kaku Gothic ProN", "Meiryo", sans-serif', boxSizing: "border-box" }}>
       
-      {/* 巡目常時表示バナー（スマホ時は折り返し対応） */}
+      {/* 巡目常時表示バナー */}
       <div style={{
         maxWidth: "840px",
         margin: "0 auto 10px",
@@ -2050,7 +2034,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* タブ表示 ①：指名ボード（スマホ縦対応グリッド） */}
+      {/* タブ表示 ①：指名ボード */}
       {activeTab === "BOARD" && (
         <div style={{
           display: "grid",
@@ -2264,7 +2248,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 📺 ドラフト中継 ズーム演出（スマホ縦対応） */}
+      {/* 📺 ドラフト中継 ズーム演出 */}
       {announcement && announcement.active && currentAnnouncingTeam && (
         <div style={{
           position: "fixed",
@@ -2443,7 +2427,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 選手選択モーダル（スマホ全画面対応） */}
+      {/* 選手選択モーダル */}
       {selectingTeam && (
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundColor: "rgba(0,0,0,0.7)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }}>
           <div style={{ backgroundColor: "#fff", width: "100%", maxWidth: "600px", height: "85vh", borderTopLeftRadius: "12px", borderTopRightRadius: "12px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -2454,7 +2438,6 @@ export default function App() {
               <button onClick={() => setSelectingTeam(null)} style={{ background: "none", border: "none", fontSize: "20px", cursor: "pointer", color: "#666", padding: "4px" }}>✕</button>
             </div>
 
-            {/* フィルタ（横スクロール可能に） */}
             <div style={{ padding: "8px 10px", borderBottom: "1px solid #e5e7eb", display: "flex", flexDirection: "column", gap: "6px", backgroundColor: "#fafafa" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "4px", overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: "2px" }}>
                 <span style={{ fontSize: "11px", fontWeight: "bold", color: "#4b5563", whiteSpace: "nowrap" }}>所属:</span>
@@ -2475,7 +2458,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* 候補選手リスト */}
             <div style={{ flex: 1, overflowY: "auto", padding: "6px 12px", WebkitOverflowScrolling: "touch" }}>
               {filteredAndSortedProspects.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "20px 0", color: "#94a3b8", fontSize: "12px" }}>
@@ -2504,7 +2486,7 @@ export default function App() {
 
                       <div style={{ flexShrink: 0 }}>
                         {isConfirmed ? (
-                          <span style={{ fontSize: "11px", color: "#9ca3af", fontWeight: "bold" }}>指名済</span>
+                          <span style={{ fontSize: "11px", color: "#94a3af", fontWeight: "bold" }}>指名済</span>
                         ) : (
                           <button
                             onClick={() => (!isDevMode && currentRound === 1) ? handleConfirmBidRound1(p) : handlePickWaiver(p)}
