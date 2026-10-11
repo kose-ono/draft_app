@@ -202,7 +202,7 @@ const isRestrictedForDevelopment = (player) => {
   return false;
 };
 
-// 選手選択AIロジック（育成時完全セーフティ）
+// 選手選択AIロジック（枯渇・例外完全防止）
 const selectAiProspect = (prospects, confirmedIds, existingPicks = [], teamProfile = null, isRound1 = false, isSubRound = false, isDevMode = false) => {
   let available = prospects.filter((p) => p && !confirmedIds.includes(p.id));
 
@@ -249,11 +249,10 @@ const selectAiProspect = (prospects, confirmedIds, existingPicks = [], teamProfi
     }
   }
 
-  // 育成およびウェーバー
   const topPlayer = available[0];
   const topRankWeight = topPlayer && topPlayer.rank ? (RANK_WEIGHT[topPlayer.rank] ?? 0) : 0;
   
-  const rankMargin = isDevMode ? 4 : 1;
+  const rankMargin = isDevMode ? 5 : 1;
   const candidates = available.filter(
     (p) => (RANK_WEIGHT[p.rank] ?? 0) >= Math.max(0, topRankWeight - rankMargin)
   );
@@ -459,6 +458,7 @@ export default function App() {
   const [selectingTeam, setSelectingTeam] = useState(null);
   const [activeTab, setActiveTab] = useState("BOARD");
 
+  // フィルター用ステート群
   const [filterCategory, setFilterCategory] = useState("ALL");
   const [filterPos, setFilterPos] = useState("ALL");
   const [filterThrow, setFilterThrow] = useState("ALL");
@@ -563,6 +563,7 @@ export default function App() {
   const teamProfiles = roomData.teamProfiles || {};
   const isDevMode = !!roomData.isDevelopmentMode;
 
+  // ホスト判定（自分がホスト、もしくはホスト未設定時は自身が代行）
   const isHost = !roomData.hostPlayerId || roomData.hostPlayerId === myPlayerId;
 
   const currentParticipants = useMemo(() => {
@@ -602,12 +603,12 @@ export default function App() {
     return waiverOrder.filter((t) => isDevMode ? !teamsState[t.id]?.isDevFinished : !teamsState[t.id]?.isFinished);
   }, [waiverOrder, teamsState, isDevMode]);
 
-  // 現在の手番球団（インデックスが超えても安全に丸める）
+  // 現在の手番球団
   const currentWaiverTeam = useMemo(() => {
     const isWaiverPhase = isDevMode ? true : currentRound >= 2;
     if (!isWaiverPhase || activeWaiverOrder.length === 0) return null;
     const rawIdx = roomData.waiverCurrentIndex || 0;
-    const safeIdx = rawIdx >= activeWaiverOrder.length ? 0 : rawIdx;
+    const safeIdx = rawIdx % activeWaiverOrder.length;
     return activeWaiverOrder[safeIdx] || null;
   }, [currentRound, activeWaiverOrder, roomData.waiverCurrentIndex, isDevMode]);
 
@@ -822,7 +823,7 @@ export default function App() {
     }
   }, [lottery?.player?.id, lottery?.currentPickerIndex, lottery?.isOpened, teamsState, isHost, currentRoomId]);
 
-  // ウェーバー手番の更新ロジック（配列短縮時に安全に先頭または次へ）
+  // ウェーバー手番送り関数
   const advanceWaiverTurn = async (updatedTeams, currentIndex, isPicked = true) => {
     if (!currentRoomId) return;
     const currentActive = waiverOrder.filter((t) => isDevMode ? !updatedTeams[t.id]?.isDevFinished : !updatedTeams[t.id]?.isFinished);
@@ -865,11 +866,23 @@ export default function App() {
     }
   };
 
-  // CPUウェーバー自動指名（完全停止防止ガード付き）
+  // CPU自動指名（完全停止防止・発表自動スキップ対応）
   useEffect(() => {
     const isWaiverPhase = isDevMode ? true : currentRound >= 2;
-    if (!isWaiverPhase || !currentWaiverTeam || announcement || !isHost || !roomData.isDraftStarted || !currentRoomId) {
-      currentWaiverStepRef.current = "";
+    if (!isWaiverPhase || !currentWaiverTeam || !isHost || !roomData.isDraftStarted || !currentRoomId) {
+      return;
+    }
+
+    // CPUの指名発表演出中であれば、自動で1.8秒後に次へ送る（手動キーボード待ちによる永久フリーズ防止）
+    if (announcement && announcement.active) {
+      const announceTeam = ALL_TEAMS_MAP[announcement.queue?.[0]];
+      const isAnnounceCpu = announceTeam && !teamsState[announceTeam.id]?.ownerId;
+      if (isAnnounceCpu) {
+        const autoNextTimer = setTimeout(() => {
+          handleNextAnnouncementStep();
+        }, 1800);
+        return () => clearTimeout(autoNextTimer);
+      }
       return;
     }
 
@@ -954,7 +967,7 @@ export default function App() {
         console.error("CPU Waiver Selection Error:", err);
         advanceWaiverTurn(teamsState, roomData.waiverCurrentIndex || 0, false);
       }
-    }, 750);
+    }, 700);
 
     return () => clearTimeout(timer);
   }, [
@@ -977,13 +990,14 @@ export default function App() {
       setIsPlayerRevealed(false);
       const timer = setTimeout(() => {
         setIsPlayerRevealed(true);
-      }, 700);
+      }, 600);
       return () => clearTimeout(timer);
     } else {
       setIsPlayerRevealed(false);
     }
   }, [announcement?.stepIndex, announcement?.active]);
 
+  // 🌟 ポジション・タイプ・打席等の完全連動フィルタリング
   const filteredAndSortedProspects = useMemo(() => {
     let pool = sortedProspects;
     if (isDevMode) {
@@ -993,6 +1007,7 @@ export default function App() {
     return pool.filter((p) => {
       if (!p) return false;
 
+      // 所属フィルター
       if (filterCategory !== "ALL") {
         if (filterCategory === "独立リーグ") {
           if (!isIndependentLeague(p)) return false;
@@ -1009,19 +1024,26 @@ export default function App() {
         }
       }
 
+      // 大ポジションフィルター
       if (filterPos !== "ALL" && p.position !== filterPos) return false;
 
+      // 投手専用フィルター
       if (filterPos === "投手") {
         if (filterThrow !== "ALL" && p.throwsHand !== filterThrow) return false;
         if (filterRole !== "ALL" && p.pitcherRole !== filterRole) return false;
       }
+
+      // 内野手専用定位置フィルター
       if (filterPos === "内野手") {
         if (filterSubPos !== "ALL" && p.subPosition !== filterSubPos) return false;
       }
+
+      // 野手全般タイプ・打席フィルター
       if (filterPos === "捕手" || filterPos === "内野手" || filterPos === "外野手") {
         if (filterBatterType !== "ALL" && p.batterType !== filterBatterType) return false;
         if (filterBatsHand !== "ALL" && p.batsHand !== filterBatsHand) return false;
       }
+
       return true;
     });
   }, [sortedProspects, filterCategory, filterPos, filterThrow, filterRole, filterSubPos, filterBatterType, filterBatsHand, isDevMode]);
@@ -2427,18 +2449,21 @@ export default function App() {
         </div>
       )}
 
-      {/* 選手選択モーダル */}
+      {/* 🌟 選手選択モーダル（スマホ全画面・完全フィルターUI完備） */}
       {selectingTeam && (
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundColor: "rgba(0,0,0,0.7)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }}>
-          <div style={{ backgroundColor: "#fff", width: "100%", maxWidth: "600px", height: "85vh", borderTopLeftRadius: "12px", borderTopRightRadius: "12px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            <div style={{ padding: "10px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: isDevMode ? "#ecfdf5" : "#f9fafb" }}>
+          <div style={{ backgroundColor: "#fff", width: "100%", maxWidth: "600px", height: "88vh", borderTopLeftRadius: "14px", borderTopRightRadius: "14px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ padding: "12px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", backgroundColor: isDevMode ? "#ecfdf5" : "#f9fafb" }}>
               <span style={{ fontSize: "14px", fontWeight: "bold", color: "#0f172a" }}>
                 【{selectingTeam.name}】 指名選手選択
               </span>
               <button onClick={() => setSelectingTeam(null)} style={{ background: "none", border: "none", fontSize: "20px", cursor: "pointer", color: "#666", padding: "4px" }}>✕</button>
             </div>
 
+            {/* フィルター操作パネル */}
             <div style={{ padding: "8px 10px", borderBottom: "1px solid #e5e7eb", display: "flex", flexDirection: "column", gap: "6px", backgroundColor: "#fafafa" }}>
+              
+              {/* 所属 */}
               <div style={{ display: "flex", alignItems: "center", gap: "4px", overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: "2px" }}>
                 <span style={{ fontSize: "11px", fontWeight: "bold", color: "#4b5563", whiteSpace: "nowrap" }}>所属:</span>
                 {(isDevMode ? ["ALL", "高校", "大学", "独立リーグ"] : ["ALL", "高校", "大学", "社会人・独立"]).map((cat) => (
@@ -2448,19 +2473,88 @@ export default function App() {
                 ))}
               </div>
 
+              {/* 守備位置（選択時にサブ条件をリセット） */}
               <div style={{ display: "flex", alignItems: "center", gap: "4px", overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: "2px" }}>
                 <span style={{ fontSize: "11px", fontWeight: "bold", color: "#4b5563", whiteSpace: "nowrap" }}>守備:</span>
                 {["ALL", "投手", "捕手", "内野手", "外野手"].map((pos) => (
-                  <button key={pos} onClick={() => { setFilterPos(pos); setFilterThrow("ALL"); setFilterRole("ALL"); setFilterSubPos("ALL"); setFilterBatterType("ALL"); setFilterBatsHand("ALL"); }} style={{ padding: "3px 8px", fontSize: "10px", borderRadius: "3px", border: "1px solid #ccc", whiteSpace: "nowrap", cursor: "pointer", backgroundColor: filterPos === pos ? "#1f2937" : "#fff", color: filterPos === pos ? "#fff" : "#333" }}>
+                  <button
+                    key={pos}
+                    onClick={() => {
+                      setFilterPos(pos);
+                      setFilterThrow("ALL");
+                      setFilterRole("ALL");
+                      setFilterSubPos("ALL");
+                      setFilterBatterType("ALL");
+                      setFilterBatsHand("ALL");
+                    }}
+                    style={{ padding: "3px 8px", fontSize: "10px", borderRadius: "3px", border: "1px solid #ccc", whiteSpace: "nowrap", cursor: "pointer", backgroundColor: filterPos === pos ? "#1f2937" : "#fff", color: filterPos === pos ? "#fff" : "#333" }}
+                  >
                     {pos === "ALL" ? "全" : pos}
                   </button>
                 ))}
               </div>
+
+              {/* 投手用サブフィルター */}
+              {filterPos === "投手" && (
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "4px 8px", backgroundColor: "#eef2ff", borderRadius: "4px", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "3px" }}>
+                    <span style={{ fontSize: "10px", fontWeight: "bold", color: "#3730a3", whiteSpace: "nowrap" }}>腕:</span>
+                    {["ALL", "右", "左"].map((t) => (
+                      <button key={t} onClick={() => setFilterThrow(t)} style={{ padding: "2px 5px", fontSize: "10px", borderRadius: "3px", border: "1px solid #a5b4fc", cursor: "pointer", backgroundColor: filterThrow === t ? "#3730a3" : "#fff", color: filterThrow === t ? "#fff" : "#333" }}>
+                        {t === "ALL" ? "全" : `${t}投`}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "3px" }}>
+                    <span style={{ fontSize: "10px", fontWeight: "bold", color: "#3730a3", whiteSpace: "nowrap" }}>適性:</span>
+                    {["ALL", "先発型", "リリーフ型", "万能型"].map((role) => (
+                      <button key={role} onClick={() => setFilterRole(role)} style={{ padding: "2px 5px", fontSize: "10px", borderRadius: "3px", border: "1px solid #a5b4fc", cursor: "pointer", backgroundColor: filterRole === role ? "#3730a3" : "#fff", color: filterRole === role ? "#fff" : "#333" }}>
+                        {role === "ALL" ? "全" : role}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 内野手用定位置フィルター */}
+              {filterPos === "内野手" && (
+                <div style={{ display: "flex", alignItems: "center", gap: "4px", padding: "4px 8px", backgroundColor: "#fef3c7", borderRadius: "4px", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                  <span style={{ fontSize: "10px", fontWeight: "bold", color: "#92400e", whiteSpace: "nowrap" }}>定位置:</span>
+                  {["ALL", "一", "二", "三", "遊"].map((sp) => (
+                    <button key={sp} onClick={() => setFilterSubPos(sp)} style={{ padding: "2px 6px", fontSize: "10px", borderRadius: "3px", border: "1px solid #fcd34d", cursor: "pointer", backgroundColor: filterSubPos === sp ? "#92400e" : "#fff", color: filterSubPos === sp ? "#fff" : "#333" }}>
+                      {sp === "ALL" ? "全" : sp}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* 野手用タイプ＆打席フィルター */}
+              {(filterPos === "捕手" || filterPos === "内野手" || filterPos === "外野手") && (
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", padding: "4px 8px", backgroundColor: "#f0fdf4", borderRadius: "4px", overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "3px" }}>
+                    <span style={{ fontSize: "10px", fontWeight: "bold", color: "#166534", whiteSpace: "nowrap" }}>タイプ:</span>
+                    {["ALL", "スラッガー", "好打", "走", "守備", "3ツール"].map((bt) => (
+                      <button key={bt} onClick={() => setFilterBatterType(bt)} style={{ padding: "2px 5px", fontSize: "10px", borderRadius: "3px", border: "1px solid #86efac", cursor: "pointer", backgroundColor: filterBatterType === bt ? "#166534" : "#fff", color: filterBatterType === bt ? "#fff" : "#333" }}>
+                        {bt === "ALL" ? "全" : bt}
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "3px" }}>
+                    <span style={{ fontSize: "10px", fontWeight: "bold", color: "#166534", whiteSpace: "nowrap" }}>打席:</span>
+                    {["ALL", "右", "左", "両"].map((hand) => (
+                      <button key={hand} onClick={() => setFilterBatsHand(hand)} style={{ padding: "2px 5px", fontSize: "10px", borderRadius: "3px", border: "1px solid #86efac", cursor: "pointer", backgroundColor: filterBatsHand === hand ? "#166534" : "#fff", color: filterBatsHand === hand ? "#fff" : "#333" }}>
+                        {hand === "ALL" ? "全" : `${hand}打`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
+            {/* 候補選手リスト */}
             <div style={{ flex: 1, overflowY: "auto", padding: "6px 12px", WebkitOverflowScrolling: "touch" }}>
               {filteredAndSortedProspects.length === 0 ? (
-                <div style={{ textAlign: "center", padding: "20px 0", color: "#94a3b8", fontSize: "12px" }}>
+                <div style={{ textAlign: "center", padding: "24px 0", color: "#94a3b8", fontSize: "12px" }}>
                   該当する候補選手がいません
                 </div>
               ) : (
@@ -2479,14 +2573,17 @@ export default function App() {
                             {p.name}
                           </div>
                           <div style={{ fontSize: "10px", color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {p.category} / {p.position} / {p.affiliation}
+                            {p.category} / {p.position}{p.subPosition ? `(${p.subPosition})` : ""} / {p.throwsHand ? `${p.throwsHand}投${p.batsHand}打` : ""}
+                            {p.pitcherRole ? ` / ${p.pitcherRole}` : ""}
+                            {p.batterType ? ` / ${p.batterType}` : ""}
+                            {" "}・ {p.affiliation}
                           </div>
                         </div>
                       </div>
 
                       <div style={{ flexShrink: 0 }}>
                         {isConfirmed ? (
-                          <span style={{ fontSize: "11px", color: "#94a3af", fontWeight: "bold" }}>指名済</span>
+                          <span style={{ fontSize: "11px", color: "#9ca3af", fontWeight: "bold" }}>指名済</span>
                         ) : (
                           <button
                             onClick={() => (!isDevMode && currentRound === 1) ? handleConfirmBidRound1(p) : handlePickWaiver(p)}
