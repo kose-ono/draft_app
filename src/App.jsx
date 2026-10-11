@@ -202,7 +202,7 @@ const isRestrictedForDevelopment = (player) => {
   return false;
 };
 
-// 選手選択AIロジック（枯渇・例外完全防止）
+// 選手選択AIロジック（完全枯渇耐性）
 const selectAiProspect = (prospects, confirmedIds, existingPicks = [], teamProfile = null, isRound1 = false, isSubRound = false, isDevMode = false) => {
   let available = prospects.filter((p) => p && !confirmedIds.includes(p.id));
 
@@ -563,9 +563,7 @@ export default function App() {
   const teamProfiles = roomData.teamProfiles || {};
   const isDevMode = !!roomData.isDevelopmentMode;
 
-  // ホスト判定（自分がホスト、もしくはホスト未設定時は自身が代行）
-  const isHost = !roomData.hostPlayerId || roomData.hostPlayerId === myPlayerId;
-
+  // 参加者一覧
   const currentParticipants = useMemo(() => {
     const map = {};
     Object.values(teamsState).forEach((t) => {
@@ -579,6 +577,13 @@ export default function App() {
     return Object.values(map);
   }, [teamsState]);
 
+  // ホスト判定（ホスト自身、または先頭参加者が代理実行）
+  const isHost = useMemo(() => {
+    if (!roomData.hostPlayerId || roomData.hostPlayerId === myPlayerId) return true;
+    if (currentParticipants.length > 0 && currentParticipants[0].id === myPlayerId) return true;
+    return false;
+  }, [roomData.hostPlayerId, myPlayerId, currentParticipants]);
+
   const myAssignedTeamIds = useMemo(() => {
     return Object.keys(teamsState).filter((tid) => teamsState[tid]?.ownerId === myPlayerId);
   }, [teamsState, myPlayerId]);
@@ -590,15 +595,15 @@ export default function App() {
     return [...CENTRAL_TEAMS, ...PACIFIC_TEAMS];
   }, [roomData.waiverOrderIds]);
 
+  // ラウンド別指名順
   const waiverOrder = useMemo(() => {
-    if (currentRound % 2 === 0) {
-      return baseTeamsList;
-    } else {
-      return [...baseTeamsList].reverse();
+    if (isDevMode) {
+      return currentRound % 2 === 1 ? baseTeamsList : [...baseTeamsList].reverse();
     }
-  }, [currentRound, baseTeamsList]);
+    return currentRound % 2 === 0 ? baseTeamsList : [...baseTeamsList].reverse();
+  }, [currentRound, baseTeamsList, isDevMode]);
 
-  // 手番がまだ残っている球団リスト
+  // まだ指名終了していない球団リスト
   const activeWaiverOrder = useMemo(() => {
     return waiverOrder.filter((t) => isDevMode ? !teamsState[t.id]?.isDevFinished : !teamsState[t.id]?.isFinished);
   }, [waiverOrder, teamsState, isDevMode]);
@@ -866,18 +871,18 @@ export default function App() {
     }
   };
 
-  // CPU自動指名（完全停止防止・発表自動スキップ対応）
+  // 🌟 CPU自動指名（思考中フリーズ・発表スタックを完全防止）
   useEffect(() => {
     const isWaiverPhase = isDevMode ? true : currentRound >= 2;
-    if (!isWaiverPhase || !currentWaiverTeam || !isHost || !roomData.isDraftStarted || !currentRoomId) {
+    if (!isWaiverPhase || !currentWaiverTeam || !roomData.isDraftStarted || !currentRoomId) {
       return;
     }
 
-    // CPUの指名発表演出中であれば、自動で1.8秒後に次へ送る（手動キーボード待ちによる永久フリーズ防止）
+    // 発表中の場合：CPUの指名であれば自動で1.8秒後に次へスキップ
     if (announcement && announcement.active) {
-      const announceTeam = ALL_TEAMS_MAP[announcement.queue?.[0]];
+      const announceTeam = ALL_TEAMS_MAP[announcement.queue?.[announcement.stepIndex || 0]];
       const isAnnounceCpu = announceTeam && !teamsState[announceTeam.id]?.ownerId;
-      if (isAnnounceCpu) {
+      if (isAnnounceCpu && isHost) {
         const autoNextTimer = setTimeout(() => {
           handleNextAnnouncementStep();
         }, 1800);
@@ -885,6 +890,8 @@ export default function App() {
       }
       return;
     }
+
+    if (!isHost) return;
 
     const tState = teamsState[currentWaiverTeam.id] || {};
     const isCpuTeam = !tState.ownerId;
@@ -975,6 +982,7 @@ export default function App() {
     currentWaiverTeam?.id,
     roomData.waiverCurrentIndex,
     announcement?.active,
+    announcement?.stepIndex,
     isHost,
     teamProfiles,
     isDevMode,
@@ -997,7 +1005,7 @@ export default function App() {
     }
   }, [announcement?.stepIndex, announcement?.active]);
 
-  // 🌟 ポジション・タイプ・打席等の完全連動フィルタリング
+  // ポジション・タイプ・打席等の完全連動フィルタリング
   const filteredAndSortedProspects = useMemo(() => {
     let pool = sortedProspects;
     if (isDevMode) {
@@ -2449,7 +2457,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 🌟 選手選択モーダル（スマホ全画面・完全フィルターUI完備） */}
+      {/* 🌟 選手選択モーダル（説明・寸評表示対応） */}
       {selectingTeam && (
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundColor: "rgba(0,0,0,0.7)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 999 }}>
           <div style={{ backgroundColor: "#fff", width: "100%", maxWidth: "600px", height: "88vh", borderTopLeftRadius: "14px", borderTopRightRadius: "14px", display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -2473,7 +2481,7 @@ export default function App() {
                 ))}
               </div>
 
-              {/* 守備位置（選択時にサブ条件をリセット） */}
+              {/* 守備位置 */}
               <div style={{ display: "flex", alignItems: "center", gap: "4px", overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: "2px" }}>
                 <span style={{ fontSize: "11px", fontWeight: "bold", color: "#4b5563", whiteSpace: "nowrap" }}>守備:</span>
                 {["ALL", "投手", "捕手", "内野手", "外野手"].map((pos) => (
@@ -2551,7 +2559,7 @@ export default function App() {
               )}
             </div>
 
-            {/* 候補選手リスト */}
+            {/* 候補選手リスト（選手寸評・説明欄つき） */}
             <div style={{ flex: 1, overflowY: "auto", padding: "6px 12px", WebkitOverflowScrolling: "touch" }}>
               {filteredAndSortedProspects.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "24px 0", color: "#94a3b8", fontSize: "12px" }}>
@@ -2563,36 +2571,50 @@ export default function App() {
                   const badge = RANK_COLORS[p.rank] || { bg: "#6b7280", text: "#fff" };
 
                   return (
-                    <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 4px", borderBottom: "1px solid #f0f0f0", opacity: isConfirmed ? 0.35 : 1, gap: "8px" }}>
-                      <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "flex-start", gap: "8px" }}>
-                        <span style={{ backgroundColor: badge.bg, color: badge.text, fontSize: "10px", fontWeight: "900", padding: "2px 5px", borderRadius: "3px", flexShrink: 0, marginTop: "2px" }}>
-                          {p.rank}
-                        </span>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontWeight: "bold", fontSize: "14px", color: "#0f172a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {p.name}
+                    <div key={p.id} style={{ display: "flex", flexDirection: "column", padding: "10px 4px", borderBottom: "1px solid #f0f0f0", opacity: isConfirmed ? 0.35 : 1, gap: "6px" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+                        <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                          <span style={{ backgroundColor: badge.bg, color: badge.text, fontSize: "10px", fontWeight: "900", padding: "2px 5px", borderRadius: "3px", flexShrink: 0 }}>
+                            {p.rank}
+                          </span>
+                          <div style={{ minWidth: 0 }}>
+                            <span style={{ fontWeight: "bold", fontSize: "14px", color: "#0f172a" }}>
+                              {p.name}
+                            </span>
+                            <span style={{ marginLeft: "6px", fontSize: "10px", color: "#64748b" }}>
+                              {p.category} / {p.position}{p.subPosition ? `(${p.subPosition})` : ""} / {p.throwsHand ? `${p.throwsHand}投${p.batsHand}打` : ""} ・ {p.affiliation}
+                            </span>
                           </div>
-                          <div style={{ fontSize: "10px", color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {p.category} / {p.position}{p.subPosition ? `(${p.subPosition})` : ""} / {p.throwsHand ? `${p.throwsHand}投${p.batsHand}打` : ""}
-                            {p.pitcherRole ? ` / ${p.pitcherRole}` : ""}
-                            {p.batterType ? ` / ${p.batterType}` : ""}
-                            {" "}・ {p.affiliation}
-                          </div>
+                        </div>
+
+                        <div style={{ flexShrink: 0 }}>
+                          {isConfirmed ? (
+                            <span style={{ fontSize: "11px", color: "#9ca3af", fontWeight: "bold" }}>指名済</span>
+                          ) : (
+                            <button
+                              onClick={() => (!isDevMode && currentRound === 1) ? handleConfirmBidRound1(p) : handlePickWaiver(p)}
+                              style={{ backgroundColor: isDevMode ? "#059669" : "#0284c7", color: "#fff", border: "none", borderRadius: "3px", padding: "6px 12px", fontSize: "11px", fontWeight: "bold", cursor: "pointer" }}
+                            >
+                              {isDevMode ? "育成指名" : "指名"}
+                            </button>
+                          )}
                         </div>
                       </div>
 
-                      <div style={{ flexShrink: 0 }}>
-                        {isConfirmed ? (
-                          <span style={{ fontSize: "11px", color: "#9ca3af", fontWeight: "bold" }}>指名済</span>
-                        ) : (
-                          <button
-                            onClick={() => (!isDevMode && currentRound === 1) ? handleConfirmBidRound1(p) : handlePickWaiver(p)}
-                            style={{ backgroundColor: isDevMode ? "#059669" : "#0284c7", color: "#fff", border: "none", borderRadius: "3px", padding: "6px 12px", fontSize: "11px", fontWeight: "bold", cursor: "pointer" }}
-                          >
-                            {isDevMode ? "育成指名" : "指名"}
-                          </button>
-                        )}
-                      </div>
+                      {/* 🌟 選手説明（寸評）欄 */}
+                      {p.description && (
+                        <div style={{
+                          fontSize: "11px",
+                          color: "#334155",
+                          lineHeight: "1.4",
+                          backgroundColor: "#f8fafc",
+                          padding: "5px 8px",
+                          borderRadius: "4px",
+                          borderLeft: "3px solid #cbd5e1"
+                        }}>
+                          {p.description}
+                        </div>
+                      )}
                     </div>
                   );
                 })
